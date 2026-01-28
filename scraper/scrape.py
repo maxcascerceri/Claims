@@ -7,7 +7,7 @@ Run: SUPABASE_URL=... SUPABASE_SERVICE_KEY=... python scrape.py
 import os
 import re
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
@@ -161,7 +161,8 @@ def _row_from_parsed(
     case_type = infer_case_type(name)
     is_major = company_name.lower() in MAJOR_BRANDS or any(b in name.lower() for b in MAJOR_BRANDS)
     stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"classaction.org/{slug}"))
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Core columns only (match your Supabase table; omit about_text and any column not in schema)
     return {
         "id": stable_id,
         "source_id": slug,
@@ -179,12 +180,6 @@ def _row_from_parsed(
         "logo_url": None,
         "created_at": now,
         "updated_at": now,
-        "case_type": case_type,
-        "payout_display": payout_display,
-        "about_text": eligibility,
-        "eligibility": eligibility,
-        "category": category,
-        "is_major_brand": is_major,
     }
 
 
@@ -315,18 +310,24 @@ def main() -> None:
     if not supabase_url or not supabase_key:
         raise SystemExit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables.")
 
-    print("Fetching settlements from ClassAction.org...")
-    rows = scrape_settlements()
-    print(f"Scraped {len(rows)} settlements.")
+    try:
+        print("Fetching settlements from ClassAction.org...")
+        rows = scrape_settlements()
+        print(f"Scraped {len(rows)} settlements.")
 
-    if not rows:
-        print("No settlements parsed. Check page structure.")
-        return
+        if not rows:
+            print("No settlements parsed. Check page structure.")
+            raise SystemExit(1)
 
-    client = create_client(supabase_url, supabase_key)
-    # Upsert on conflict source_id (table must have unique on source_id)
-    result = client.table("settlements").upsert(rows, on_conflict="source_id").execute()
-    print(f"Upserted {len(rows)} rows into Supabase settlements.")
+        client = create_client(supabase_url, supabase_key)
+        # Upsert on conflict source_id (table must have unique on source_id)
+        result = client.table("settlements").upsert(rows, on_conflict="source_id").execute()
+        print(f"Upserted {len(rows)} rows into Supabase settlements.")
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

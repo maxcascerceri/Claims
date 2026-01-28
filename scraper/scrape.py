@@ -177,6 +177,11 @@ def parse_card_text(name: str, slug: str, claim_url: str, text: str) -> dict | N
             description = match.group(1).strip()
             break
     
+    # Check if this is a major brand (for "Picked for You")
+    name_lower = name.lower()
+    company_lower = company_name.lower()
+    is_major_brand = any(brand in name_lower or brand in company_lower for brand in MAJOR_BRANDS)
+    
     # Generate stable ID
     stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"classaction.org/{slug}"))
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -196,6 +201,7 @@ def parse_card_text(name: str, slug: str, claim_url: str, text: str) -> dict | N
         "source_url": SETTLEMENTS_URL,
         "is_featured": None,
         "logo_url": None,
+        "is_major_brand": is_major_brand,
         "created_at": now,
         "updated_at": now,
     }

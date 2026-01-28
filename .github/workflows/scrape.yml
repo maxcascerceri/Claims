@@ -1,0 +1,29 @@
+# Run settlements scraper twice per day and upsert into Supabase.
+# Add repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY (Project Settings → Secrets and variables → Actions).
+name: Scrape Settlements
+
+on:
+  schedule:
+    # 6:00 and 18:00 UTC daily
+    - cron: "0 6,18 * * *"
+  workflow_dispatch: # Allow manual run from Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Run scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scraper/scrape.py

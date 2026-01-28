@@ -220,6 +220,7 @@ def scrape_settlements() -> list[dict]:
     seen_slugs = set()
 
     # Strategy 1: elements with data-name (ClassAction.org card attributes)
+    # Use the smallest parent that has exactly ONE external claim link so we get this card's text only.
     for el in soup.find_all(attrs={"data-name": True}):
         data_name = el.get("data-name", "").strip()
         data_slug = (el.get("data-slug") or slug_from_name(data_name)).strip().lower()
@@ -227,37 +228,58 @@ def scrape_settlements() -> list[dict]:
             continue
 
         card = el
-        for _ in range(8):
+        claim_url = None
+        prev_card = None
+        for _ in range(10):
             card = card.parent
             if card is None:
                 break
-            text = card.get_text(separator=" ", strip=True)
-            claim_url = None
-            for a in card.find_all("a", href=True):
-                href = (a.get("href") or "").strip()
-                if href.startswith("http") and "classaction.org" not in href:
-                    claim_url = href
-                    break
-            if not claim_url or len(text) < 50:
-                continue
-            payout_display, payout_min, payout_max, deadline_str, days_left, requires_proof, eligibility = _parse_card_text(text)
-            name = data_name if "Settlement" in data_name else f"{data_name} Class Action Settlement"
-            row = _row_from_parsed(
-                name=name,
-                slug=data_slug,
-                claim_url=claim_url,
-                text=text,
-                payout_display=payout_display,
-                payout_min=payout_min,
-                payout_max=payout_max,
-                deadline_str=deadline_str,
-                days_left=days_left,
-                requires_proof=requires_proof,
-                eligibility=eligibility,
-            )
-            rows.append(row)
-            seen_slugs.add(data_slug)
-            break
+            external_links = [
+                (a.get("href") or "").strip()
+                for a in card.find_all("a", href=True)
+                if (a.get("href") or "").strip().startswith("http") and "classaction.org" not in (a.get("href") or "")
+            ]
+            if len(external_links) == 1:
+                claim_url = external_links[0]
+                prev_card = card
+            elif len(external_links) > 1 and prev_card is not None:
+                # We went too far; use the last level that had exactly one link
+                card = prev_card
+                claim_url = [
+                    (a.get("href") or "").strip()
+                    for a in card.find_all("a", href=True)
+                    if (a.get("href") or "").strip().startswith("http") and "classaction.org" not in (a.get("href") or "")
+                ][0]
+                break
+            elif len(external_links) > 1:
+                break
+        if not claim_url:
+            continue
+        # Use the card that had exactly one link (this settlement only)
+        if prev_card is not None:
+            card = prev_card
+        if card is None:
+            continue
+        text = card.get_text(separator=" ", strip=True)
+        if len(text) < 50:
+            continue
+        payout_display, payout_min, payout_max, deadline_str, days_left, requires_proof, eligibility = _parse_card_text(text)
+        name = data_name if "Settlement" in data_name else f"{data_name} Class Action Settlement"
+        row = _row_from_parsed(
+            name=name,
+            slug=data_slug,
+            claim_url=claim_url,
+            text=text,
+            payout_display=payout_display,
+            payout_min=payout_min,
+            payout_max=payout_max,
+            deadline_str=deadline_str,
+            days_left=days_left,
+            requires_proof=requires_proof,
+            eligibility=eligibility,
+        )
+        rows.append(row)
+        seen_slugs.add(data_slug)
 
     # Strategy 2: fallback — find h2/h3 with links to external URLs, treat as card title
     if len(rows) < 10:
@@ -304,6 +326,19 @@ def scrape_settlements() -> list[dict]:
     return rows
 
 
+def normalize_name_for_comparison(name: str) -> str:
+    """Normalize a settlement name for comparison (lowercase, remove punctuation, collapse spaces)."""
+    import string
+    s = name.lower()
+    s = s.translate(str.maketrans("", "", string.punctuation))
+    s = re.sub(r"\s+", " ", s).strip()
+    # Remove common suffixes for matching
+    for suffix in ["class action settlement", "settlement"]:
+        if s.endswith(suffix):
+            s = s[:-len(suffix)].strip()
+    return s
+
+
 def main() -> None:
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -311,18 +346,58 @@ def main() -> None:
         raise SystemExit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables.")
 
     try:
+        client = create_client(supabase_url, supabase_key)
+
+        # Fetch existing settlement names from Supabase
+        print("Fetching existing settlements from Supabase...")
+        existing = client.table("settlements").select("name, company_name, claim_url").execute()
+        existing_names = set()
+        existing_urls = set()
+        for row in existing.data:
+            if row.get("name"):
+                existing_names.add(normalize_name_for_comparison(row["name"]))
+            if row.get("company_name"):
+                existing_names.add(normalize_name_for_comparison(row["company_name"]))
+            if row.get("claim_url"):
+                existing_urls.add(row["claim_url"].lower().rstrip("/"))
+        print(f"Found {len(existing.data)} existing settlements.")
+
+        # Scrape ClassAction.org
         print("Fetching settlements from ClassAction.org...")
         rows = scrape_settlements()
-        print(f"Scraped {len(rows)} settlements.")
+        print(f"Scraped {len(rows)} settlements from website.")
 
         if not rows:
             print("No settlements parsed. Check page structure.")
             raise SystemExit(1)
 
-        client = create_client(supabase_url, supabase_key)
-        # Upsert on conflict source_id (table must have unique on source_id)
-        result = client.table("settlements").upsert(rows, on_conflict="source_id").execute()
-        print(f"Upserted {len(rows)} rows into Supabase settlements.")
+        # Filter to only NEW settlements (not already in DB by name or claim_url)
+        new_rows = []
+        for row in rows:
+            name_normalized = normalize_name_for_comparison(row["name"])
+            company_normalized = normalize_name_for_comparison(row["company_name"])
+            url_normalized = (row.get("claim_url") or "").lower().rstrip("/")
+
+            # Skip if name, company, or claim_url already exists
+            if name_normalized in existing_names:
+                continue
+            if company_normalized in existing_names:
+                continue
+            if url_normalized and url_normalized in existing_urls:
+                continue
+
+            new_rows.append(row)
+
+        print(f"Found {len(new_rows)} NEW settlements to add.")
+
+        if not new_rows:
+            print("No new settlements to add. Database is up to date.")
+            return
+
+        # Insert only the new rows
+        result = client.table("settlements").insert(new_rows).execute()
+        print(f"Inserted {len(new_rows)} new settlements into Supabase.")
+
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback

@@ -1,12 +1,16 @@
+# DISABLED - Moved to manual dashboard approach
+# Uncomment the schedule section below to re-enable automatic scraping
+#
 # Run settlements scraper twice per day and upsert into Supabase.
 # Add repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY (Project Settings → Secrets and variables → Actions).
-name: Scrape Settlements
+name: Scrape Settlements (DISABLED)
 
 on:
-  schedule:
-    # 6:00 and 18:00 UTC daily
-    - cron: "0 6,18 * * *"
-  workflow_dispatch: # Allow manual run from Actions tab
+  # DISABLED: Automatic schedule - uncomment to re-enable
+  # schedule:
+  #   # 6:00 and 18:00 UTC daily
+  #   - cron: "0 6,18 * * *"
+  workflow_dispatch: # Allow manual run from Actions tab (kept for testing)
 
 jobs:
   scrape:
